@@ -1,6 +1,5 @@
 import express from "express";
-import GatePass from "../models/GatePass.js";
-import User from "../models/User.js";
+import { supabase } from "../config/supabase.js";
 import QRCode from "qrcode";
 
 const router = express.Router();
@@ -8,7 +7,18 @@ const router = express.Router();
 // 🔹 Get all passes
 router.get("/", async (req, res) => {
   try {
-    const passes = await GatePass.find().populate("userId");
+    const { data: passes, error } = await supabase
+      .from("gate_passes")
+      .select(`
+        *,
+        profiles (
+          full_name,
+          roll_no
+        )
+      `)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
     res.json(passes);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -18,9 +28,19 @@ router.get("/", async (req, res) => {
 // 🔹 Request new pass
 router.post("/request", async (req, res) => {
   try {
-    const { userId, reason } = req.body;
-    const pass = new GatePass({ userId, reason, status: "pending" });
-    await pass.save();
+    const { userId, reason, type } = req.body;
+    const { data: pass, error } = await supabase
+      .from("gate_passes")
+      .insert([{ 
+        user_id: userId, 
+        reason, 
+        type: type || "regular",
+        status: "pending" 
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
     res.status(201).json(pass);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -30,19 +50,39 @@ router.post("/request", async (req, res) => {
 // 🔹 Update pass status (Approve / Reject)
 router.put("/:id", async (req, res) => {
   try {
-    const pass = await GatePass.findById(req.params.id).populate("userId");
-    if (!pass) return res.status(404).json({ message: "Pass not found" });
+    const { status } = req.body;
+    const { data: pass, error: fetchError } = await supabase
+      .from("gate_passes")
+      .select(`
+        *,
+        profiles (
+          id,
+          full_name,
+          roll_no
+        )
+      `)
+      .eq("id", req.params.id)
+      .single();
 
-    pass.status = req.body.status || pass.status;
+    if (fetchError || !pass) return res.status(404).json({ message: "Pass not found" });
+
+    let updatedFields = { status: status || pass.status };
 
     // ✅ Generate QR only when approved
-    if (pass.status === "approved") {
-      const qrData = JSON.stringify({ passId: pass._id, userId: pass.userId._id });
-      pass.qrCode = await QRCode.toDataURL(qrData);
+    if (status === "approved") {
+      const qrData = JSON.stringify({ passId: pass.id, userId: pass.profiles?.id });
+      updatedFields.qr_code = await QRCode.toDataURL(qrData);
     }
 
-    await pass.save();
-    res.json(pass);
+    const { data: updatedPass, error: updateError } = await supabase
+      .from("gate_passes")
+      .update(updatedFields)
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+    res.json(updatedPass);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
